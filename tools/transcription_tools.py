@@ -26,6 +26,7 @@ Usage::
         print(result["transcript"])
 """
 
+import base64
 import logging
 import os
 import shlex
@@ -77,6 +78,10 @@ COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 OPENAI_BASE_URL = os.getenv("STT_OPENAI_BASE_URL", "https://api.openai.com/v1")
 XAI_STT_BASE_URL = os.getenv("XAI_STT_BASE_URL", "https://api.x.ai/v1")
+
+NVCF_BASE_URL = "https://api.nvcf.nvidia.com"
+NVCF_TDT_ASR_DEFAULT_FUNCTION_ID = "d3fe9151-442b-4204-a70d-5fcc597fd610"
+DEFAULT_NVIDIA_ASR_SAMPLE_RATE = 16000
 
 SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
 LOCAL_NATIVE_AUDIO_FORMATS = {".wav", ".aiff", ".aif"}
@@ -254,9 +259,17 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "nvidia":
+            if os.getenv("NVIDIA_API_KEY"):
+                return "nvidia"
+            logger.warning(
+                "STT provider 'nvidia' configured but NVIDIA_API_KEY not set"
+            )
+            return "none"
+
         return provider  # Unknown — let it fail downstream
 
-    # --- Auto-detect (no explicit provider): local > groq > openai > mistral > xai -
+    # --- Auto-detect (no explicit provider): local > groq > openai > mistral > xai > nvidia -
 
     if _HAS_FASTER_WHISPER:
         return "local"
@@ -274,6 +287,9 @@ def _get_provider(stt_config: dict) -> str:
     if os.getenv("XAI_API_KEY"):
         logger.info("No local STT available, using xAI Grok STT API")
         return "xai"
+    if os.getenv("NVIDIA_API_KEY"):
+        logger.info("No local STT available, using NVIDIA Parakeet TDT ASR")
+        return "nvidia"
     return "none"
 
 # ---------------------------------------------------------------------------
@@ -768,6 +784,123 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: nvidia (Parakeet TDT via NVCF REST)
+# ---------------------------------------------------------------------------
+
+# Riva AudioEncoding enum values
+_RIVA_ENCODING_MAP = {
+    ".wav": 1,    # LINEAR_PCM
+    ".flac": 2,   # FLAC
+    ".mp3": 6,    # MP3
+    ".ogg": 7,    # OGGOPUS
+    ".opus": 10,  # OPUS
+    ".aac": 9,    # AAC
+    ".m4a": 9,    # AAC
+    ".webm": 7,   # treat as Opus
+}
+
+
+def _transcribe_nvidia(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using NVIDIA Parakeet TDT via NVCF REST API."""
+    api_key = os.getenv("NVIDIA_API_KEY")
+    if not api_key:
+        return {"success": False, "transcript": "", "error": "NVIDIA_API_KEY not set"}
+
+    try:
+        import requests
+    except ImportError:
+        return {"success": False, "transcript": "", "error": "requests package not installed"}
+
+    try:
+        stt_config = _load_stt_config()
+        nvidia_cfg = stt_config.get("nvidia", {})
+        function_id = nvidia_cfg.get("function_id", NVCF_TDT_ASR_DEFAULT_FUNCTION_ID)
+        sample_rate = int(nvidia_cfg.get("sample_rate_hz", DEFAULT_NVIDIA_ASR_SAMPLE_RATE))
+
+        audio_path = Path(file_path)
+        ext = audio_path.suffix.lower()
+        encoding = _RIVA_ENCODING_MAP.get(ext, 1)
+
+        # Convert to mono 16kHz WAV (LINEAR_PCM) for best Parakeet compatibility
+        ffmpeg = _find_ffmpeg_binary()
+        if ext not in (".wav",) and ffmpeg:
+            with tempfile.TemporaryDirectory(prefix="hermes-nvidia-asr-") as tmp_dir:
+                wav_path = os.path.join(tmp_dir, f"{audio_path.stem}.wav")
+                try:
+                    subprocess.run(
+                        [ffmpeg, "-y", "-i", file_path, "-ar", str(sample_rate), "-ac", "1", wav_path],
+                        check=True, capture_output=True,
+                    )
+                    with open(wav_path, "rb") as f:
+                        audio_bytes = f.read()
+                    encoding = 1  # LINEAR_PCM
+                except subprocess.CalledProcessError:
+                    with open(file_path, "rb") as f:
+                        audio_bytes = f.read()
+        else:
+            with open(file_path, "rb") as f:
+                audio_bytes = f.read()
+
+        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+
+        payload = {
+            "config": {
+                "encoding": encoding,
+                "sampleRateHertz": sample_rate,
+                "languageCode": "en-US",
+                "maxAlternatives": 1,
+                "enableAutomaticPunctuation": True,
+            },
+            "audio": {"content": audio_b64},
+        }
+
+        url = f"{NVCF_BASE_URL}/v2/nvcf/pexec/functions/{function_id}"
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+
+        if response.status_code != 200:
+            try:
+                detail = str(response.json())[:300]
+            except Exception:
+                detail = response.text[:300]
+            return {
+                "success": False,
+                "transcript": "",
+                "error": f"NVIDIA ASR API error (HTTP {response.status_code}): {detail}",
+            }
+
+        result = response.json()
+        transcript = ""
+        for r in result.get("results", []):
+            alts = r.get("alternatives", [])
+            if alts:
+                transcript += alts[0].get("transcript", "")
+
+        transcript = transcript.strip()
+        if not transcript:
+            return {"success": False, "transcript": "", "error": "NVIDIA Parakeet TDT returned empty transcript"}
+
+        logger.info(
+            "Transcribed %s via NVIDIA Parakeet TDT (%d chars)",
+            audio_path.name, len(transcript),
+        )
+        return {"success": True, "transcript": transcript, "provider": "nvidia"}
+
+    except PermissionError:
+        return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        logger.error("NVIDIA ASR transcription failed: %s", e, exc_info=True)
+        return {"success": False, "transcript": "", "error": f"NVIDIA ASR failed: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -841,6 +974,10 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = model or "grok-stt"
         return _transcribe_xai(file_path, model_name)
 
+    if provider == "nvidia":
+        model_name = model or "parakeet-tdt-1.1b"
+        return _transcribe_nvidia(file_path, model_name)
+
     # No provider available
     return {
         "success": False,
@@ -849,8 +986,9 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             "No STT provider available. Install faster-whisper for free local "
             f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
             "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
-            "Voxtral Transcribe, set XAI_API_KEY for xAI Grok STT, or set VOICE_TOOLS_OPENAI_KEY "
-            "or OPENAI_API_KEY for the OpenAI Whisper API."
+            "Voxtral Transcribe, set XAI_API_KEY for xAI Grok STT, set NVIDIA_API_KEY "
+            "for NVIDIA Parakeet TDT, or set VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY "
+            "for the OpenAI Whisper API."
         ),
     }
 

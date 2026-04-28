@@ -111,6 +111,11 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+NVCF_BASE_URL = "https://api.nvcf.nvidia.com"
+NVCF_TTS_DEFAULT_FUNCTION_ID = "877104f7-e885-42b9-8de8-f6e4c6303969"
+DEFAULT_NVIDIA_TTS_VOICE = "Magpie-Multilingual.EN-US.Aria"
+DEFAULT_NVIDIA_TTS_LANGUAGE = "en-US"
+DEFAULT_NVIDIA_TTS_SAMPLE_RATE = 22050
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -139,6 +144,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
+    "nvidia": 5000,       # Magpie TTS via NVCF
 }
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
@@ -764,6 +770,116 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 
 
 # ===========================================================================
+# Provider: NVIDIA Magpie TTS (via NVCF REST)
+# ===========================================================================
+
+def _generate_nvidia_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using NVIDIA Magpie TTS via NVCF REST API.
+
+    Supports OGG_OPUS output natively (ideal for Telegram voice bubbles).
+    Falls back to LINEAR_PCM wrapped in WAV for other formats, with ffmpeg
+    conversion to MP3/OGG as needed.
+    """
+    import requests
+
+    api_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("NVIDIA_API_KEY not set. Get one at https://build.nvidia.com")
+
+    nvidia_cfg = tts_config.get("nvidia", {})
+    function_id = nvidia_cfg.get("function_id", NVCF_TTS_DEFAULT_FUNCTION_ID)
+    voice = str(nvidia_cfg.get("voice", DEFAULT_NVIDIA_TTS_VOICE)).strip() or DEFAULT_NVIDIA_TTS_VOICE
+    language = str(nvidia_cfg.get("language", DEFAULT_NVIDIA_TTS_LANGUAGE)).strip() or DEFAULT_NVIDIA_TTS_LANGUAGE
+    sample_rate = int(nvidia_cfg.get("sample_rate_hz", DEFAULT_NVIDIA_TTS_SAMPLE_RATE))
+
+    # Use native OGG_OPUS for .ogg output; LINEAR_PCM otherwise
+    use_opus = output_path.lower().endswith(".ogg")
+    encoding = "OGG_OPUS" if use_opus else "LINEAR_PCM"
+
+    payload = {
+        "text": text,
+        "languageCode": language,
+        "encoding": encoding,
+        "sampleRateHz": sample_rate,
+        "voiceName": voice,
+    }
+
+    url = f"{NVCF_BASE_URL}/v2/nvcf/pexec/functions/{function_id}"
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        try:
+            detail = str(response.json())[:300]
+        except Exception:
+            detail = response.text[:300]
+        raise RuntimeError(f"NVIDIA Magpie TTS API error (HTTP {response.status_code}): {detail}")
+
+    result = response.json()
+    audio_b64 = result.get("audio", "")
+    if not audio_b64:
+        raise RuntimeError("NVIDIA Magpie TTS returned empty audio")
+
+    audio_bytes = base64.b64decode(audio_b64)
+
+    if use_opus:
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return output_path
+
+    # LINEAR_PCM — wrap in WAV, then convert to target format via ffmpeg if needed
+    import io
+    import wave as _wave
+
+    wav_buffer = io.BytesIO()
+    with _wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_bytes)
+    wav_bytes = wav_buffer.getvalue()
+
+    if output_path.lower().endswith(".wav"):
+        with open(output_path, "wb") as f:
+            f.write(wav_bytes)
+        return output_path
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(wav_bytes)
+        wav_path = tmp.name
+
+    try:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            if output_path.lower().endswith(".ogg"):
+                cmd = [
+                    ffmpeg, "-i", wav_path,
+                    "-acodec", "libopus", "-ac", "1",
+                    "-b:a", "64k", "-vbr", "off",
+                    "-y", "-loglevel", "error", output_path,
+                ]
+            else:
+                cmd = [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+        else:
+            shutil.copyfile(wav_path, output_path)
+    finally:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
+
+    return output_path
+
+
+# ===========================================================================
 # NeuTTS (local, on-device TTS via neutts_cli)
 # ===========================================================================
 
@@ -968,7 +1084,7 @@ def text_to_speech_tool(
         out_dir.mkdir(parents=True, exist_ok=True)
         # Use .ogg for Telegram with providers that support native Opus output,
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
-        if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini"):
+        if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini", "nvidia"):
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
@@ -1048,6 +1164,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with KittenTTS (local, ~25MB)...")
             _generate_kittentts(text, file_str, tts_config)
 
+        elif provider == "nvidia":
+            logger.info("Generating speech with NVIDIA Magpie TTS...")
+            _generate_nvidia_tts(text, file_str, tts_config)
+
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
             edge_available = True
@@ -1092,7 +1212,7 @@ def text_to_speech_tool(
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
+        elif provider in ("elevenlabs", "openai", "mistral", "gemini", "nvidia"):
             voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
@@ -1173,6 +1293,8 @@ def check_tts_requirements() -> bool:
     if _check_neutts_available():
         return True
     if _check_kittentts_available():
+        return True
+    if os.getenv("NVIDIA_API_KEY"):
         return True
     return False
 
@@ -1471,6 +1593,7 @@ if __name__ == "__main__":
         f"{'set' if resolve_openai_audio_api_key() else 'not set (VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY)'}"
     )
     print(f"  MiniMax:    {'API key set' if os.getenv('MINIMAX_API_KEY') else 'not set (MINIMAX_API_KEY)'}")
+    print(f"  NVIDIA:     {'API key set' if os.getenv('NVIDIA_API_KEY') else 'not set (NVIDIA_API_KEY)'}")
     print(f"  ffmpeg:     {'✅ found' if _has_ffmpeg() else '❌ not found (needed for Telegram Opus)'}")
     print(f"\n  Output dir: {DEFAULT_OUTPUT_DIR}")
 
