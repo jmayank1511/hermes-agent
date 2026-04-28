@@ -15,7 +15,8 @@ Supports nine TTS providers:
 
 Output formats:
 - Opus (.ogg) for Telegram voice bubbles (requires ffmpeg for Edge TTS)
-- MP3 (.mp3) for everything else (CLI, Discord, WhatsApp)
+- WAV (.wav) for NVIDIA/Riva by default, matching its native PCM output
+- MP3 (.mp3) for most other providers (CLI, Discord, WhatsApp)
 
 Configuration is loaded from ~/.hermes/config.yaml under the 'tts:' key.
 The user chooses the provider and voice; the model just sends text.
@@ -1068,10 +1069,14 @@ def text_to_speech_tool(
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = Path(DEFAULT_OUTPUT_DIR)
         out_dir.mkdir(parents=True, exist_ok=True)
-        # Use .ogg for Telegram with providers that support native Opus output,
-        # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
+        # Use .ogg for Telegram voice messages when the provider can produce
+        # Opus-compatible output. NVIDIA/Riva returns LINEAR_PCM for normal
+        # file output, so default to .wav instead of forcing a lossy MP3
+        # conversion or saving WAV bytes behind a misleading .mp3 suffix.
         if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini", "nvidia"):
             file_path = out_dir / f"tts_{timestamp}.ogg"
+        elif provider == "nvidia":
+            file_path = out_dir / f"tts_{timestamp}.wav"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
 
@@ -1190,10 +1195,10 @@ def text_to_speech_tool(
                 "error": f"TTS generation produced no output (provider: {provider})"
             }, ensure_ascii=False)
 
-        # Try Opus conversion for Telegram compatibility
-        # Edge TTS outputs MP3, NeuTTS/KittenTTS output WAV — all need ffmpeg conversion
+        # Try Opus conversion for Telegram compatibility.
+        # Edge TTS outputs MP3; NeuTTS/KittenTTS and NVIDIA/Riva default to WAV.
         voice_compatible = False
-        if provider in ("edge", "neutts", "minimax", "xai", "kittentts") and not file_str.endswith(".ogg"):
+        if want_opus and provider in ("edge", "neutts", "minimax", "xai", "kittentts", "nvidia") and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
