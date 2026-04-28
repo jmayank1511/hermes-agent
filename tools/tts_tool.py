@@ -113,7 +113,6 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-NVCF_BASE_URL = "https://api.nvcf.nvidia.com"
 NVCF_TTS_DEFAULT_FUNCTION_ID = "877104f7-e885-42b9-8de8-f6e4c6303969"
 DEFAULT_NVIDIA_TTS_VOICE = "Magpie-Multilingual.EN-US.Aria"
 DEFAULT_NVIDIA_TTS_LANGUAGE = "en-US"
@@ -776,13 +775,19 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 # ===========================================================================
 
 def _generate_nvidia_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Generate audio using NVIDIA Magpie TTS via NVCF REST API.
+    """Generate audio using NVIDIA Magpie TTS via Riva gRPC (NVCF cloud).
 
     Supports OGG_OPUS output natively (ideal for Telegram voice bubbles).
     Falls back to LINEAR_PCM wrapped in WAV for other formats, with ffmpeg
-    conversion to MP3/OGG as needed.
+    conversion to MP3 as needed.
     """
-    import requests
+    try:
+        import riva.client
+        from riva.client.proto.riva_audio_pb2 import AudioEncoding
+    except ImportError:
+        raise RuntimeError(
+            "nvidia-riva-client not installed. Run: pip install 'hermes-agent[nvidia]'"
+        )
 
     api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     if not api_key:
@@ -794,56 +799,41 @@ def _generate_nvidia_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     language = str(nvidia_cfg.get("language", DEFAULT_NVIDIA_TTS_LANGUAGE)).strip() or DEFAULT_NVIDIA_TTS_LANGUAGE
     sample_rate = int(nvidia_cfg.get("sample_rate_hz", DEFAULT_NVIDIA_TTS_SAMPLE_RATE))
 
-    # Use native OGG_OPUS for .ogg output; LINEAR_PCM otherwise
-    use_opus = output_path.lower().endswith(".ogg")
-    encoding = "OGG_OPUS" if use_opus else "LINEAR_PCM"
-
-    payload = {
-        "text": text,
-        "languageCode": language,
-        "encoding": encoding,
-        "sampleRateHz": sample_rate,
-        "voiceName": voice,
-    }
-
-    url = f"{NVCF_BASE_URL}/v2/nvcf/pexec/functions/{function_id}"
-    response = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=60,
+    auth = riva.client.Auth(
+        use_ssl=True,
+        uri="grpc.nvcf.nvidia.com:443",
+        metadata_args=[
+            ["authorization", f"Bearer {api_key}"],
+            ["function-id", function_id],
+        ],
     )
 
-    if response.status_code != 200:
-        try:
-            detail = str(response.json())[:300]
-        except Exception:
-            detail = response.text[:300]
-        raise RuntimeError(f"NVIDIA Magpie TTS API error (HTTP {response.status_code}): {detail}")
+    use_opus = output_path.lower().endswith(".ogg")
+    encoding = AudioEncoding.OGGOPUS if use_opus else AudioEncoding.LINEAR_PCM
 
-    result = response.json()
-    audio_b64 = result.get("audio", "")
-    if not audio_b64:
-        raise RuntimeError("NVIDIA Magpie TTS returned empty audio")
-
-    audio_bytes = base64.b64decode(audio_b64)
+    tts_service = riva.client.SpeechSynthesisService(auth)
+    response = tts_service.synthesize(
+        text=text,
+        voice_name=voice,
+        language_code=language,
+        encoding=encoding,
+        sample_rate_hz=sample_rate,
+    )
+    audio_bytes = response.audio
 
     if use_opus:
         with open(output_path, "wb") as f:
             f.write(audio_bytes)
         return output_path
 
-    # LINEAR_PCM — wrap in WAV, then convert to target format via ffmpeg if needed
+    # LINEAR_PCM raw samples — wrap in WAV container
     import io
     import wave as _wave
 
     wav_buffer = io.BytesIO()
     with _wave.open(wav_buffer, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setsampwidth(2)  # 16-bit
         wf.setframerate(sample_rate)
         wf.writeframes(audio_bytes)
     wav_bytes = wav_buffer.getvalue()
@@ -860,16 +850,10 @@ def _generate_nvidia_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     try:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg:
-            if output_path.lower().endswith(".ogg"):
-                cmd = [
-                    ffmpeg, "-i", wav_path,
-                    "-acodec", "libopus", "-ac", "1",
-                    "-b:a", "64k", "-vbr", "off",
-                    "-y", "-loglevel", "error", output_path,
-                ]
-            else:
-                cmd = [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path]
-            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+            subprocess.run(
+                [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path],
+                check=True, capture_output=True, timeout=30,
+            )
         else:
             shutil.copyfile(wav_path, output_path)
     finally:
