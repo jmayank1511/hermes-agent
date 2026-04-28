@@ -123,9 +123,12 @@ This is usually the best place to start.
 Add to `~/.hermes/.env`:
 
 ```bash
-# Cloud STT options (local needs no key)
+# Cloud STT/TTS options (local STT and Edge TTS need no key)
 GROQ_API_KEY=***
 VOICE_TOOLS_OPENAI_KEY=***
+MISTRAL_API_KEY=***
+XAI_API_KEY=***
+NVIDIA_API_KEY=***
 
 # Premium TTS (optional)
 ELEVENLABS_API_KEY=***
@@ -138,6 +141,9 @@ ELEVENLABS_API_KEY=***
 - `local` → best default for privacy and zero-cost use
 - `groq` → very fast cloud transcription
 - `openai` → good paid fallback
+- `mistral` → Voxtral cloud transcription
+- `xai` → Grok STT with formatting and optional diarization
+- `nvidia` → NVIDIA Riva-family hosted ASR via NVCF
 
 #### Text-to-speech
 
@@ -146,6 +152,8 @@ ELEVENLABS_API_KEY=***
 - `elevenlabs` → best quality
 - `openai` → good middle ground
 - `mistral` → multilingual, native Opus
+- `gemini` → 30 prebuilt voices with prompt control
+- `nvidia` → NVIDIA Riva-family hosted Magpie TTS with native Opus
 
 ### If you use `hermes setup`
 

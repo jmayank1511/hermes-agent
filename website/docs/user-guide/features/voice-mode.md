@@ -57,7 +57,7 @@ pip install "hermes-agent[all]"
 | `messaging` | `discord.py[voice]`, `python-telegram-bot`, `aiohttp` | Discord & Telegram bots |
 | `tts-premium` | `elevenlabs` | ElevenLabs TTS provider |
 
-Optional local TTS provider: install `neutts` separately with `python -m pip install -U neutts[all]`. On first use it downloads the model automatically.
+Cloud speech providers only need API keys: `VOICE_TOOLS_OPENAI_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, or `NVIDIA_API_KEY` depending on the provider. Optional local TTS provider: install `neutts` separately with `python -m pip install -U neutts[all]`. On first use it downloads the model automatically.
 
 :::info
 `discord.py[voice]` installs **PyNaCl** (for voice encryption) and **opus bindings** automatically. This is required for Discord voice channel support.
@@ -89,11 +89,14 @@ Add to `~/.hermes/.env`:
 ```bash
 # Speech-to-Text — local provider needs NO key at all
 # pip install faster-whisper          # Free, runs locally, recommended
-GROQ_API_KEY=your-key                 # Groq Whisper — fast, free tier (cloud)
-VOICE_TOOLS_OPENAI_KEY=your-key       # OpenAI Whisper — paid (cloud)
+GROQ_API_KEY=***                      # Groq Whisper — fast, free tier (cloud)
+VOICE_TOOLS_OPENAI_KEY=your-key       # OpenAI Whisper/TTS — paid (cloud)
+MISTRAL_API_KEY=***                   # Mistral Voxtral STT/TTS
+XAI_API_KEY=***                       # xAI Grok STT/TTS
+NVIDIA_API_KEY=***                    # NVIDIA Riva-family hosted ASR/TTS
 
 # Text-to-Speech (optional — Edge TTS and NeuTTS work without any key)
-ELEVENLABS_API_KEY=***           # ElevenLabs — premium quality
+ELEVENLABS_API_KEY=***                # ElevenLabs — premium quality
 # VOICE_TOOLS_OPENAI_KEY above also enables OpenAI TTS
 ```
 

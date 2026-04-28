@@ -2,14 +2,16 @@
 """
 Text-to-Speech Tool Module
 
-Supports seven TTS providers:
+Supports nine TTS providers:
 - Edge TTS (default, free, no API key): Microsoft Edge neural voices
 - ElevenLabs (premium): High-quality voices, needs ELEVENLABS_API_KEY
 - OpenAI TTS: Good quality, needs OPENAI_API_KEY
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
+- xAI TTS: Grok voices, needs XAI_API_KEY
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
-- NeuTTS (local, free, no API key): On-device TTS via neutts_cli, needs neutts installed
+- NVIDIA Riva / Magpie TTS: Hosted NVCF Riva-family TTS, native Opus, needs NVIDIA_API_KEY
+- NeuTTS / KittenTTS (local, free, no API key): On-device TTS engines
 
 Output formats:
 - Opus (.ogg) for Telegram voice bubbles (requires ffmpeg for Edge TTS)

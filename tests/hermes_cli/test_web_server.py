@@ -205,6 +205,14 @@ class TestWebServerEndpoints:
         assert len(data["category_order"]) > 0
         assert "general" in data["category_order"]
 
+    def test_config_schema_includes_nvidia_speech_providers(self):
+        resp = self.client.get("/api/config/schema")
+        assert resp.status_code == 200
+        schema = resp.json()["fields"]
+
+        assert "nvidia" in schema["tts.provider"]["options"]
+        assert "nvidia" in schema["stt.provider"]["options"]
+
     def test_get_config_defaults(self):
         resp = self.client.get("/api/config/defaults")
         assert resp.status_code == 200

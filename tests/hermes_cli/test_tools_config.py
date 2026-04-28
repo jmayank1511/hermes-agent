@@ -29,6 +29,39 @@ def test_get_platform_tools_uses_default_when_platform_not_configured():
 def test_configurable_toolsets_include_messaging():
     assert any(ts_key == "messaging" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
 
+
+def test_tts_provider_registry_includes_nvidia_riva():
+    """The tools configurator should expose NVIDIA/Riva speech setup."""
+    providers = TOOL_CATEGORIES["tts"]["providers"]
+    nvidia = next((p for p in providers if p.get("tts_provider") == "nvidia"), None)
+
+    assert nvidia is not None
+    assert "NVIDIA" in nvidia["name"]
+    assert "Riva" in nvidia["name"] or "Magpie" in nvidia["name"]
+    assert nvidia["env_vars"] == [
+        {
+            "key": "NVIDIA_API_KEY",
+            "prompt": "NVIDIA API key",
+            "url": "https://build.nvidia.com/",
+        }
+    ]
+
+
+def test_default_speech_config_includes_nvidia_riva_defaults():
+    from hermes_cli.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["tts"]["nvidia"] == {
+        "function_id": "877104f7-e885-42b9-8de8-f6e4c6303969",
+        "voice": "Magpie-Multilingual.EN-US.Aria",
+        "language": "en-US",
+        "sample_rate_hz": 22050,
+    }
+    assert DEFAULT_CONFIG["stt"]["nvidia"] == {
+        "function_id": "d3fe9151-442b-4204-a70d-5fcc597fd610",
+        "sample_rate_hz": 16000,
+    }
+
+
 def test_get_platform_tools_default_telegram_includes_messaging():
     enabled = _get_platform_tools({}, "telegram")
 
